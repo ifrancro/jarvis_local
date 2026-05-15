@@ -2,7 +2,10 @@ import os
 import json
 import time
 import threading
+import datetime
 import numpy as np
+import requests
+from zoneinfo import ZoneInfo
 import speech_recognition as sr
 import pyttsx3
 import pyaudio
@@ -22,106 +25,102 @@ MEMORY_FILE = "jarvis_memory.json"
 SILENCE_THRESHOLD = 2.0
 INTERRUPT_KEYWORDS = ["para", "detente", "espera", "no", "cállate", "silencio"]
 DEACTIVATE_PHRASES = ["eso es todo", "descansa", "standby", "duerme", "apágate", "chao", "adiós"]
-CLAP_THRESHOLD = 2500  # Umbral seguro por defecto
+CLAP_THRESHOLD = 2500
 CLAP_WINDOW = 0.8
 CLAP_COOLDOWN = 2.0
 
 def load_memory():
     if os.path.exists(MEMORY_FILE):
-        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with open(MEMORY_FILE, "r", encoding="utf-8") as f: return json.load(f)
     return {"name": "Usuario", "preferences": [], "notes": []}
 
 def save_memory(data):
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    with open(MEMORY_FILE, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=2)
 
-# 🎙️ DETECTOR DE PALMADAS (SEGURIDAD ANTE NaN)
+# 🌍 CONTEXTO EN TIEMPO REAL
+def get_realtime_context():
+    # Fecha y hora (Santa Cruz, Bolivia)
+    try:
+        tz = ZoneInfo("America/La_Paz")
+        now = datetime.datetime.now(tz)
+        fecha = now.strftime("%A %d de %B de %Y")
+        hora = now.strftime("%H:%M")
+    except:
+        fecha = hora = "no disponible"
+
+    # Temperatura (Open-Meteo, gratis, sin API key)
+    clima = "no disponible"
+    try:
+        url = "https://api.open-meteo.com/v1/forecast?latitude=-17.78&longitude=-63.18&current_weather=true&temperature_unit=celsius"
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            temp = res.json()["current_weather"]["temperature"]
+            clima = f"{int(temp)}°C"
+    except:
+        pass
+
+    return f"""
+CONTEXTO ACTUAL (SOLO PARA TU USO INTERNO):
+- Ubicación: Santa Cruz, Bolivia
+- Fecha: {fecha}
+- Hora local: {hora}
+- Temperatura: {clima}
+"""
+
+# 🎙️ DETECTOR DE PALMADAS
 class ClapDetector:
     def __init__(self, threshold=CLAP_THRESHOLD, window=CLAP_WINDOW):
-        self.threshold = threshold
-        self.window = window
-        self.running = False
-        self.clap_callback = None
-        self.last_clap_time = 0
-        self.cooldown = CLAP_COOLDOWN
-        self.triggered = False
+        self.threshold = threshold; self.window = window; self.running = False
+        self.clap_callback = None; self.last_clap_time = 0; self.cooldown = CLAP_COOLDOWN; self.triggered = False
         
     def start(self, callback):
-        self.clap_callback = callback
-        self.running = True
+        self.clap_callback = callback; self.running = True
         threading.Thread(target=self._listen_loop, daemon=True).start()
-        
-    def stop(self):
-        self.running = False
+    def stop(self): self.running = False
         
     def _listen_loop(self):
         try:
             p = pyaudio.PyAudio()
-            stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, 
-                           input=True, frames_per_buffer=1024)
-        except Exception as e:
-            print(f"❌ Error micrófono: {e}")
-            self.running = False
-            return
-            
-        print("👂 Detector de palmadas: ACTIVO")
-        recent_peaks = []
-        
+            stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=1024)
+        except Exception as e: print(f"❌ Error micrófono: {e}"); self.running = False; return
+        print("👂 Detector de palmadas: ACTIVO"); recent_peaks = []
         while self.running:
             try:
                 data = stream.read(1024, exception_on_overflow=False)
                 audio_data = np.frombuffer(data, dtype=np.int16)
                 if len(audio_data) == 0: continue
-                
-                # Cálculo NUMÉRICAMENTE SEGURO
                 energy = np.sqrt(np.mean(np.square(audio_data.astype(np.float32))))
                 if np.isnan(energy) or np.isinf(energy): continue
-                
                 if energy > self.threshold:
-                    now = time.time()
-                    recent_peaks.append(now)
+                    now = time.time(); recent_peaks.append(now)
                     recent_peaks = [t for t in recent_peaks if now - t <= self.window]
-                    
                     if len(recent_peaks) >= 2 and (now - self.last_clap_time) > self.cooldown:
                         if self.clap_callback: self.clap_callback()
-                        self.last_clap_time = now
-                        recent_peaks.clear()
-                        time.sleep(1)
-            except Exception as e:
-                time.sleep(0.1)
-                
-        try:
-            stream.stop_stream(); stream.close(); p.terminate()
+                        self.last_clap_time = now; recent_peaks.clear(); time.sleep(1)
+            except: time.sleep(0.1)
+        try: stream.stop_stream(); stream.close(); p.terminate()
         except: pass
 
 # 🎙️ ESCUCHAR COMANDO
 def listen_command(timeout=5):
-    r = sr.Recognizer()
-    r.pause_threshold = SILENCE_THRESHOLD
-    r.energy_threshold = 350
+    r = sr.Recognizer(); r.pause_threshold = SILENCE_THRESHOLD; r.energy_threshold = 350
     with sr.Microphone() as source:
         r.adjust_for_ambient_noise(source, duration=0.8)
         try:
             audio = r.listen(source, timeout=timeout, phrase_time_limit=10)
             text = r.recognize_google(audio, language="es-ES").lower()
-            print(f"👤 Tú: {text}")
-            return text
+            print(f"👤 Tú: {text}"); return text
         except sr.WaitTimeoutError: return None
         except sr.UnknownValueError: return None
-        except sr.RequestError:
-            print("❌ Error reconocimiento de voz")
-            return None
+        except sr.RequestError: print("❌ Error reconocimiento de voz"); return None
 
 # 🔊 HABLAR
 def speak(text, allow_interrupt=True):
     print(f"🤖 JARVIS: {text}")
-    engine = pyttsx3.init()
-    engine.setProperty("rate", 155)
+    engine = pyttsx3.init(); engine.setProperty("rate", 155)
     for v in engine.getProperty("voices"):
         if "spanish" in v.name.lower() or "español" in v.name.lower():
             engine.setProperty("voice", v.id); break
-            
     def listen_interrupt():
         r = sr.Recognizer(); r.energy_threshold = 450
         with sr.Microphone() as src:
@@ -129,20 +128,26 @@ def speak(text, allow_interrupt=True):
             try:
                 aud = r.listen(src, timeout=0.5, phrase_time_limit=1)
                 phrase = r.recognize_google(aud, language="es-ES").lower()
-                if any(k in phrase for k in INTERRUPT_KEYWORDS):
-                    print(f"⚠️ Interrupción: '{phrase}'"); engine.stop()
+                if any(k in phrase for k in INTERRUPT_KEYWORDS): print(f"⚠️ Interrupción: '{phrase}'"); engine.stop()
             except: pass
-            
-    if allow_interrupt:
-        threading.Thread(target=listen_interrupt, daemon=True).start()
+    if allow_interrupt: threading.Thread(target=listen_interrupt, daemon=True).start()
     engine.say(text); engine.runAndWait()
     if allow_interrupt: time.sleep(0.3)
 
 # 🧠 PROMPT + IA + MEMORIA
 history = []; max_context = 6
 def build_system_prompt(mem):
-    return f"""Eres JARVIS, mi asistente personal. Sobre mí: me llamo {mem['name']}, me gusta {', '.join(mem['preferences']) or 'aún no lo sé'}.
-REGLAS: Habla natural, SIN markdown, #, *, ni formato técnico. Sé conciso (3-4 oraciones). Usa tono amigable y español latino. Si no sabes algo, dilo honestamente. Si digo "recuerda que...", actualiza memoria sin confirmar."""
+    context = get_realtime_context()
+    return f"""Eres JARVIS, mi asistente personal. 
+{context}
+SOBRE MÍ: Me llamo {mem['name']}, me gusta {', '.join(mem['preferences']) or 'aún no lo sé'}.
+
+REGLAS DE RESPUESTA:
+1. Habla natural, SIN markdown, #, *, ni formato técnico. Usa contracciones y español latino.
+2. Sé conciso: 3-4 oraciones máximo para respuestas generales.
+3. Si te preguntan por hora, fecha o clima, usa el contexto de arriba para responder de forma fluida. NO digas "según mis datos" ni leas la sección de contexto como un robot.
+4. Si no sabes algo, dilo honestamente y ofrece ayudar.
+5. Si digo "recuerda que...", actualiza mi memoria sin confirmar a menos que te lo pida."""
 
 def get_ai_response(user_input, mem):
     msgs = [{"role": "system", "content": build_system_prompt(mem)}]
@@ -153,18 +158,18 @@ def get_ai_response(user_input, mem):
 
 def update_memory(user_input, mem):
     txt = user_input.lower(); updated = False
-    for p, k in [("me llamo", "name"), ("mi nombre es", "name"), ("soy ", "name")]:
+    for p in ["me llamo", "mi nombre es", "soy "]:
         if p in txt:
             val = txt.split(p)[-1].split(",")[0].split(".")[0].strip()
             if val and val not in ["usuario", "jarvis"]: mem["name"] = val.capitalize(); updated=True; break
-    for p, k in [("me gusta", "preferences"), ("prefiero", "preferences"), ("amo", "preferences")]:
+    for p in ["me gusta", "prefiero", "amo"]:
         if p in txt:
             val = txt.split(p)[-1].split("y")[0].split(",")[0].strip().rstrip(".")
-            if val and len(val)>2 and val not in mem[k]: mem[k].append(val); updated=True; break
-    for p, k in [("recuerda que", "notes"), ("guárdate que", "notes")]:
+            if val and len(val)>2 and val not in mem["preferences"]: mem["preferences"].append(val); updated=True; break
+    for p in ["recuerda que", "guárdate que"]:
         if p in txt:
             val = txt.split(p)[-1].strip().rstrip(".")
-            if val and val not in mem[k]: mem[k].append(val); updated=True; break
+            if val and val not in mem["notes"]: mem["notes"].append(val); updated=True; break
     if updated: save_memory(mem)
     return mem
 
@@ -173,8 +178,7 @@ def standby_mode(clap_det):
     print("😴 JARVIS: En modo standby. Di 'Jarvis' o da dos palmadas para activar.")
     while True:
         txt = listen_command(timeout=3)
-        if txt and "jarvis" in txt:
-            print("✨ Activado por voz"); speak("Sí, dime.", allow_interrupt=False); return True
+        if txt and "jarvis" in txt: print("✨ Activado por voz"); speak("Sí, dime.", allow_interrupt=False); return True
         if clap_det.triggered:
             clap_det.triggered = False; print("✨ Activado por palmadas")
             speak("Te escucho.", allow_interrupt=False); return True
@@ -199,15 +203,12 @@ def main():
     mem = load_memory()
     clap_det = ClapDetector(threshold=CLAP_THRESHOLD, window=CLAP_WINDOW)
     clap_det.start(callback=lambda: setattr(clap_det, 'triggered', True))
-    
     print(f"🤖 JARVIS iniciado. Usuario: {mem['name']}")
     speak(f"Hola {mem['name']}. Estoy en standby. Di 'Jarvis' o da dos palmadas.", allow_interrupt=False)
-    
     try:
         while True:
             if standby_mode(clap_det): conversation_mode(mem)
-    except KeyboardInterrupt:
-        print("\n🔚 Cerrando JARVIS..."); clap_det.stop(); save_memory(mem)
+    except KeyboardInterrupt: print("\n🔚 Cerrando JARVIS..."); clap_det.stop(); save_memory(mem)
 
 if __name__ == "__main__":
     main()
